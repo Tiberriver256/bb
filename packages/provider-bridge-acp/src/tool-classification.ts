@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import nodePath from "node:path";
 import type {
   DeltaFileChange,
   DeltaItemShape,
@@ -16,12 +18,14 @@ import { z } from "zod";
 import {
   commandPresentation,
   fileChangePresentation,
+  imageViewPresentation,
   toolKindPresentation,
   type AcpFileChangeVerb,
 } from "./presentation.js";
 import {
   classifyAcpToolCall as classifyAcpToolCallOperation,
   extractAcpToolCallPaths,
+  isAcpUrlLikePath,
   resolveAcpToolCallPath,
   type AcpToolCallOperation,
   type AcpToolCallPathOptions,
@@ -376,21 +380,39 @@ function fileChangeItem(
   };
 }
 
+const ACP_IMAGE_READ_PATH_PATTERN = /\.(?:png|jpe?g|gif|webp|bmp)$/i;
+
 function fileReadItem(
   event: AcpToolCallUpdateEvent,
   title: string | undefined,
   options: AcpToolCallPathOptions | undefined,
 ): AcpClassifiedToolCall | null {
   const ticked = tickedTokenFromTitle(title);
-  const path =
-    extractAcpToolCallPaths(event, options)[0] ??
+  const candidate =
+    extractAcpToolCallPaths(event)[0] ??
     (ticked !== undefined && looksLikePath(ticked) ? ticked : undefined);
-  if (path === undefined) {
+  if (candidate === undefined) {
     return null;
   }
+  const isUrl = isAcpUrlLikePath(candidate);
+  const resolvedPath = isUrl
+    ? candidate
+    : candidate.startsWith("~/")
+      ? nodePath.join(homedir(), candidate.slice(2))
+      : resolveAcpToolCallPath(candidate, options);
+  if (
+    !isUrl &&
+    nodePath.isAbsolute(resolvedPath) &&
+    ACP_IMAGE_READ_PATH_PATTERN.test(resolvedPath)
+  ) {
+    return {
+      item: { type: "imageView", path: resolvedPath },
+      presentation: imageViewPresentation(resolvedPath),
+    };
+  }
   return {
-    item: { type: "fileRead", path },
-    presentation: fileReadPresentation(path),
+    item: { type: "fileRead", path: resolvedPath },
+    presentation: fileReadPresentation(resolvedPath),
   };
 }
 

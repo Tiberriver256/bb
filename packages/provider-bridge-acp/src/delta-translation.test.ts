@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { threadScope, turnScope, type ThreadEvent } from "@bb/domain";
@@ -1862,6 +1863,143 @@ describe("acp delta translation (native kinds → core kinds)", () => {
         title: "a.ts",
       },
     });
+  });
+
+  it.each([
+    [
+      {
+        name: "read_file",
+        title: "File /workspace/shots/preview.png",
+        locations: [{ path: "/workspace/shots/preview.png" }],
+        rawInput: { Path: "/workspace/shots/preview.png" },
+      },
+      "/workspace/shots/preview.png",
+    ],
+    [
+      { locations: [{ path: "/workspace/photo.jpg" }] },
+      "/workspace/photo.jpg",
+    ],
+    [
+      { rawInput: { file_path: "assets/photo.JPEG" } },
+      path.resolve(SESSION_CWD, "assets/photo.JPEG"),
+    ],
+    [
+      { rawInput: { Path: "/workspace/shots/capture.webp" } },
+      "/workspace/shots/capture.webp",
+    ],
+    [
+      { locations: [{ path: "~/animation.gif" }] },
+      path.join(homedir(), "animation.gif"),
+    ],
+    [
+      { title: "Read `./assets/preview.webp`" },
+      path.resolve(SESSION_CWD, "assets/preview.webp"),
+    ],
+    [{ rawInput: { path: "/workspace/bitmap.bmp" } }, "/workspace/bitmap.bmp"],
+  ])(
+    "maps a local image read to imageView through one stable lifecycle: %j",
+    (source, imagePath) => {
+      const harness = createHarness();
+      harness.translate(turnStartedEvent());
+
+      const startedEvents = harness.translate(
+        updateEvent({
+          sessionUpdate: "tool_call",
+          toolCallId: "read-img-1",
+          kind: "read",
+          status: "in_progress",
+          ...source,
+        }),
+      );
+      const completedEvents = harness.translate(
+        updateEvent({
+          sessionUpdate: "tool_call_update",
+          toolCallId: "read-img-1",
+          status: "completed",
+        }),
+      );
+
+      expect(startedEvents).toHaveLength(1);
+      expect(completedEvents).toHaveLength(1);
+      const started = startedEvents[0];
+      const completed = completedEvents[0];
+      expect(started?.type).toBe("item/started");
+      expect(completed?.type).toBe("item/completed");
+      if (
+        started?.type === "item/started" &&
+        completed?.type === "item/completed"
+      ) {
+        const expected = {
+          type: "imageView",
+          path: imagePath,
+          presentation: {
+            label: { pending: "Viewing image", completed: "Viewed image" },
+            icon: { glyph: "Eye" },
+            title: path.basename(imagePath),
+          },
+        };
+        expect(started.item).toMatchObject(expected);
+        expect(completed.item).toMatchObject({
+          ...expected,
+          id: started.item.id,
+        });
+      }
+      expect(
+        harness
+          .translate(turnCompletedEvent("end_turn"))
+          .filter((event) => event.type === "item/completed"),
+      ).toEqual([]);
+    },
+  );
+
+  it.each([
+    "/workspace/notes.md",
+    "/workspace/picture.png.txt",
+    "https://example.com/diagram.png",
+    "file:///workspace/capture.png",
+    "//images.invalid/capture.png",
+    "~another/capture.png",
+  ])("keeps non-local-image reads as fileRead: %s", (readPath) => {
+    expect(
+      openItem({
+        toolCallId: "read-non-img",
+        title: "Read File",
+        kind: "read",
+        locations: [{ path: readPath }],
+      }),
+    ).toMatchObject({ type: "fileRead", path: readPath });
+  });
+
+  it("keeps relative image reads without cwd as fileRead", () => {
+    const translator = createAcpDeltaTranslator();
+    const assembler = createDeltaAssembler({
+      providerId: "acp",
+      entropyPrefix: ENTROPY,
+      textDeltaFlushMs: 0,
+    });
+    const emit = (event: ProviderRuntimeEvent) =>
+      assembler.assemble({
+        threadId: THREAD_ID,
+        deltas: translator.translateAcpEvent(event, { threadId: THREAD_ID }),
+      });
+    emit(turnStartedEvent());
+    const relNoCwd = emit(
+      updateEvent({
+        sessionUpdate: "tool_call",
+        toolCallId: "read-img-no-cwd",
+        title: "Read File",
+        kind: "read",
+        status: "in_progress",
+        locations: [{ path: "shots/a.png" }],
+      }),
+    )[0];
+    expect(relNoCwd?.type).toBe("item/started");
+    if (relNoCwd?.type === "item/started") {
+      expect(relNoCwd.item).toMatchObject({
+        type: "fileRead",
+        path: "shots/a.png",
+      });
+    }
   });
 
   it("recovers the read path from a single code-ticked title token", () => {
